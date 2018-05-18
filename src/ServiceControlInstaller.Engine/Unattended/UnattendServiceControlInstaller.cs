@@ -123,6 +123,7 @@ namespace ServiceControlInstaller.Engine.Unattended
                 }
 
                 options.ApplyChangesToInstance(instance);
+                instance.UpdateDatabase(msg => logger.Info($"Updating Database {msg}..."));
                 instance.SetupInstance();
 
                 if (instance.ReportCard.HasErrors)
