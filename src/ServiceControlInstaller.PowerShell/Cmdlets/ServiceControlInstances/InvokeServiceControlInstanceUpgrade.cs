@@ -4,7 +4,9 @@ namespace ServiceControlInstaller.PowerShell
 {
     using System;
     using System.IO;
+    using System.Linq;
     using System.Management.Automation;
+    using ServiceControlInstaller.Engine;
     using ServiceControlInstaller.Engine.Configuration.ServiceControl;
     using ServiceControlInstaller.Engine.Instances;
     using ServiceControlInstaller.Engine.Unattended;
@@ -30,6 +32,10 @@ namespace ServiceControlInstaller.PowerShell
         [Parameter(Mandatory = false, HelpMessage = "Do not automatically create new queues")]
         public SwitchParameter SkipQueueCreation { get; set; }
 
+        [Parameter(Mandatory = false, HelpMessage = "Port for exposing RavenDB in the maintenance mode")]
+        [ValidateRange(1, 49151)]
+        public int? DatabaseMaintenancePort { get; set; }
+
 
         protected override void BeginProcessing()
         {
@@ -39,17 +45,34 @@ namespace ServiceControlInstaller.PowerShell
         protected override void ProcessRecord()
         {
             var logger = new PSLogger(Host);
+            InvokeUpgrade(Path.GetDirectoryName(MyInvocation.MyCommand.Module.Path), logger, ThrowTerminatingError);
+        }
 
-            var zipFolder = Path.GetDirectoryName(MyInvocation.MyCommand.Module.Path);
+        public void InvokeUpgrade(string zipFolder, ILogging logger, Action<ErrorRecord> throwTerminatingError)
+        {
             var installer = new UnattendServiceControlInstaller(logger, zipFolder);
-            
+            var allInstances = InstanceFinder.ServiceControlInstances();
+            var usedPorts = allInstances
+                .SelectMany(p => new[] { p.Port, p.DatabaseMaintenancePort })
+                .Where(p => p.HasValue)
+                .Select(p => p.Value)
+                .Distinct()
+                .ToList();
+
             foreach (var name in Name)
             {
-                var options = new ServiceControlUpgradeOptions { AuditRetentionPeriod = AuditRetentionPeriod, ErrorRetentionPeriod = ErrorRetentionPeriod, OverrideEnableErrorForwarding =  ForwardErrorMessages, SkipQueueCreation = SkipQueueCreation};
-                var instance = InstanceFinder.FindServiceControlInstance(name);
+                var options = new ServiceControlUpgradeOptions
+                {
+                    AuditRetentionPeriod = AuditRetentionPeriod,
+                    ErrorRetentionPeriod = ErrorRetentionPeriod,
+                    OverrideEnableErrorForwarding = ForwardErrorMessages,
+                    SkipQueueCreation = SkipQueueCreation,
+                    MaintenancePort = DatabaseMaintenancePort
+                };
+                var instance = allInstances.Single(p => p.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
                 if (instance == null)
                 {
-                    WriteWarning($"No action taken. An instance called {name} was not found");
+                    logger.Warn($"No action taken. An instance called {name} was not found");
                     break;
                 }
 
@@ -67,25 +90,37 @@ namespace ServiceControlInstaller.PowerShell
                         }
                     }
                 }
-                
+
+                // From Version 2.0 require database maintenance port to be specified explicitly
+                if (installer.ZipInfo.Version.Major >= 2 && !options.MaintenancePort.HasValue && !instance.AppConfig.AppSettingExists(SettingsList.DatabaseMaintenancePort.Name))
+                {
+                    throwTerminatingError(new ErrorRecord(new Exception($"Upgrade of {instance.Name} aborted. DatabaseMaintenancePort parameter must be specified because the configuration file has no setting for DatabaseMaintenancePort. This setting is mandatory as of version 2.0"), "UpgradeFailure", ErrorCategory.InvalidArgument, null));
+                }
+
+                // If changing maintenance port it must be unique
+                if (options.MaintenancePort.HasValue && options.MaintenancePort != instance.DatabaseMaintenancePort && usedPorts.Contains(options.MaintenancePort.Value))
+                {
+                    throwTerminatingError(new ErrorRecord(new Exception($"Upgrade of {instance.Name} aborted. DatabaseMaintenancePort parameter must be unique."), "UpgradeFailure", ErrorCategory.InvalidArgument, null));
+                }
+
                 if (!options.OverrideEnableErrorForwarding.HasValue & !instance.AppConfig.AppSettingExists(SettingsList.ForwardErrorMessages.Name))
                 {
-                    ThrowTerminatingError(new ErrorRecord(new Exception($"Upgrade of {instance.Name} aborted. ForwardErrorMessages parameter must be set to true or false because the configuration file has no setting for ForwardErrorMessages. This setting is mandatory as of version 1.12"), "UpgradeFailure", ErrorCategory.InvalidArgument, null));
+                    throwTerminatingError(new ErrorRecord(new Exception($"Upgrade of {instance.Name} aborted. ForwardErrorMessages parameter must be set to true or false because the configuration file has no setting for ForwardErrorMessages. This setting is mandatory as of version 1.12"), "UpgradeFailure", ErrorCategory.InvalidArgument, null));
                 }
 
                 if (!options.ErrorRetentionPeriod.HasValue & !instance.AppConfig.AppSettingExists(SettingsList.ErrorRetentionPeriod.Name))
                 {
-                    ThrowTerminatingError(new ErrorRecord(new Exception($"Upgrade of {instance.Name} aborted. ErrorRetentionPeriod parameter must be set to timespan because the configuration file has no setting for ErrorRetentionPeriod. This setting is mandatory as of version 1.13"), "UpgradeFailure", ErrorCategory.InvalidArgument, null));
+                    throwTerminatingError(new ErrorRecord(new Exception($"Upgrade of {instance.Name} aborted. ErrorRetentionPeriod parameter must be set to timespan because the configuration file has no setting for ErrorRetentionPeriod. This setting is mandatory as of version 1.13"), "UpgradeFailure", ErrorCategory.InvalidArgument, null));
                 }
-                
+
                 if (!options.AuditRetentionPeriod.HasValue & !instance.AppConfig.AppSettingExists(SettingsList.AuditRetentionPeriod.Name))
                 {
-                    ThrowTerminatingError(new ErrorRecord(new Exception($"Upgrade of {instance.Name} aborted. AuditRetentionPeriod parameter must be set to timespan because the configuration file has no setting for AuditRetentionPeriod. This setting is mandatory as of version 1.13"), "UpgradeFailure", ErrorCategory.InvalidArgument, null));
+                    throwTerminatingError(new ErrorRecord(new Exception($"Upgrade of {instance.Name} aborted. AuditRetentionPeriod parameter must be set to timespan because the configuration file has no setting for AuditRetentionPeriod. This setting is mandatory as of version 1.13"), "UpgradeFailure", ErrorCategory.InvalidArgument, null));
                 }
 
                 if (!installer.Upgrade(instance, options))
                 {
-                    ThrowTerminatingError(new ErrorRecord(new Exception($"Upgrade of {instance.Name} failed"), "UpgradeFailure", ErrorCategory.InvalidResult, null));
+                    throwTerminatingError(new ErrorRecord(new Exception($"Upgrade of {instance.Name} failed"), "UpgradeFailure", ErrorCategory.InvalidResult, null));
                 }
             }
         }

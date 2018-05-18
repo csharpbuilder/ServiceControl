@@ -55,7 +55,7 @@ namespace ServiceControlInstaller.Engine.Instances
             Service.Refresh();
             HostName = AppConfig.Read(SettingsList.HostName, "localhost");
             Port = AppConfig.Read(SettingsList.Port, 33333);
-            DatabaseMaintenancePort = AppConfig.Read<int?>(SettingsList.DatabaseMaintenancePort, null);
+            DatabaseMaintenancePort = AppConfig.Read(SettingsList.DatabaseMaintenancePort, Version.Major >= 2 ? 33334 : (int?) null);
             VirtualDirectory = AppConfig.Read(SettingsList.VirtualDirectory, (string)null);
             LogPath = AppConfig.Read(SettingsList.LogPath, DefaultLogPath());
             DBPath = AppConfig.Read(SettingsList.DBPath, DefaultDBPath());
@@ -162,6 +162,10 @@ namespace ServiceControlInstaller.Engine.Instances
         {
             get
             {
+                if (!DatabaseMaintenancePort.HasValue)
+                {
+                    return null;
+                }
                 var baseUrl = $"http://{HostName}:{DatabaseMaintenancePort}/";
                 return baseUrl;
             }
@@ -280,9 +284,11 @@ namespace ServiceControlInstaller.Engine.Instances
             oldSettings.RemoveUrlAcl();
             var reservation = new UrlReservation(AclUrl, new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null));
             reservation.Create();
-
-            var maintanceReservation = new UrlReservation(AclMaintenanceUrl, new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null));
-            maintanceReservation.Create();
+            if (AclMaintenanceUrl != null)
+            {
+                var maintanceReservation = new UrlReservation(AclMaintenanceUrl, new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null));
+                maintanceReservation.Create();
+            }
         }
 
         string DefaultDBPath()
@@ -314,7 +320,7 @@ namespace ServiceControlInstaller.Engine.Instances
         public void RemoveUrlAcl()
         {
             foreach (var urlReservation in UrlReservation.GetAll().Where(p => p.Url.StartsWith(AclUrl, StringComparison.OrdinalIgnoreCase) ||
-                                                                              p.Url.StartsWith(AclMaintenanceUrl, StringComparison.OrdinalIgnoreCase)))
+                                                                              AclMaintenanceUrl != null && p.Url.StartsWith(AclMaintenanceUrl, StringComparison.OrdinalIgnoreCase)))
             {
                 try
                 {
